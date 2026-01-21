@@ -389,35 +389,95 @@ switch_docker_source() {
     esac
     log_info "Docker APT 源：$D_SOURCE"
 
-    rm -f /etc/apt/sources.list.d/docker.list
-    curl -fsSL "${D_SOURCE}/${OS}/gpg" | gpg --dearmor -o /usr/share/keyrings/docker.gpg
+    local DOCKER_OS_ID=""
+    if [[ -f /etc/os-release ]]; then
+        DOCKER_OS_ID="$(. /etc/os-release && echo "${ID}")"
+    fi
+    case "$DOCKER_OS_ID" in
+        ubuntu|debian) : ;;
+        *)
+            # 兜底：基于 lsb_release
+            if command -v lsb_release >/dev/null 2>&1; then
+                local dist
+                dist="$(lsb_release -is 2>/dev/null | tr '[:upper:]' '[:lower:]')"
+                if [[ "$dist" == "ubuntu" ]]; then
+                    DOCKER_OS_ID="ubuntu"
+                elif [[ "$dist" == "debian" ]]; then
+                    DOCKER_OS_ID="debian"
+                else
+                    # 再兜底一次：你脚本面向 Debian/Ubuntu，默认 ubuntu
+                    DOCKER_OS_ID="ubuntu"
+                fi
+            else
+                DOCKER_OS_ID="ubuntu"
+            fi
+        ;;
+    esac
 
-    UB_VER="$(lsb_release -cs 2>/dev/null || true)"
-    if [[ -z "$UB_VER" && -f /etc/os-release ]]; then
-        # 兜底：不用 lsb_release 也能拿到 codename
+    # 2) codename（Ubuntu: noble/jammy；Debian: bookworm/bullseye）
+    local UB_VER=""
+    if [[ -f /etc/os-release ]]; then
         UB_VER="$(. /etc/os-release && echo "${VERSION_CODENAME}")"
     fi
-
-    # Ubuntu 24.04 (noble) 官方仓库缺失时，用 jammy 兜底（你原逻辑保留）
-    if [[ "$UB_VER" == "noble" ]]; then
-        log_notice "Docker 官方尚未提供 Ubuntu 24.04 仓库，自动使用 jammy 仓库。"
-        UB_VER="jammy"
+    if [[ -z "$UB_VER" ]]; then
+        UB_VER="$(lsb_release -cs 2>/dev/null || true)"
+    fi
+    if [[ -z "$UB_VER" ]]; then
+        log_error "无法识别系统 codename（lsb_release 与 /etc/os-release 均失败）"
+        return 0 
     fi
 
-    cat >/etc/apt/sources.list.d/docker.list <<EOF
-deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker.gpg] ${D_SOURCE}/${OS} ${UB_VER} stable
-EOF
+    local REPO_BASE="${D_SOURCE%/}"
+    if [[ "$REPO_BASE" == "https://download.docker.com/linux" ]]; then
+        REPO_BASE="${REPO_BASE}/${DOCKER_OS_ID}"
+    elif [[ "$REPO_BASE" == *"/docker-ce/linux" ]]; then
+        REPO_BASE="${REPO_BASE}/${DOCKER_OS_ID}"
+    else
+        :
+    fi
+    log_info "Docker Repo Base：${REPO_BASE}"
+    log_info "Docker Codename：${UB_VER}"
 
     apt update
+    apt install -y ca-certificates curl gnupg
 
-    if [[ "$INSTALL_MODE" == "compose_only" ]]; then
-        log_info "仅安装/修复 docker compose 插件..."
-        apt install -y docker-compose-plugin
+    install -m 0755 -d /etc/apt/keyrings
+    rm -f /etc/apt/keyrings/docker.gpg
+
+    if ! curl -fsSL "${REPO_BASE}/gpg" | gpg --dearmor -o /etc/apt/keyrings/docker.gpg; then
+        log_error "Docker GPG Key 下载失败：${REPO_BASE}/gpg"
+        return 0
+    fi
+    chmod a+r /etc/apt/keyrings/docker.gpg
+
+    if [[ "$INSTALL_MODE" == "reinstall" ]]; then
+        log_notice "重装模式：移除可能冲突的旧包..."
+        apt remove -y docker docker-engine docker.io containerd runc docker-compose docker-compose-v2 docker-doc podman-docker || true
+    fi
+
+    # 6) 写入 docker.list（signed-by 指向 /etc/apt/keyrings/docker.gpg）
+    cat >/etc/apt/sources.list.d/docker.list <<EOF
+deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] ${REPO_BASE} ${UB_VER} stable
+EOF
+
+    if ! apt update; then
+        log_error "Docker APT 源更新失败：${REPO_BASE} ${UB_VER}（网络/代理/源不可用）"
         return 0
     fi
 
+    # 7) compose_only：只装插件
+    if [[ "$INSTALL_MODE" == "compose_only" ]]; then
+        log_info "仅安装/修复 docker compose 插件..."
+        apt install -y docker-compose-plugin || true
+        return 0
+    fi
+
+    # 8) 安装 Docker CE
     log_info "安装/重装 Docker CE..."
-    apt install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+    apt install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin || true
+
+    # 尽量启动（失败也不阻断）
+    systemctl enable --now docker >/dev/null 2>&1 || true
 
     echo
     yellow "是否配置 Docker 国内镜像加速器？"
@@ -435,7 +495,7 @@ EOF
   ]
 }
 EOF
-        systemctl restart docker
+        systemctl restart docker >/dev/null 2>&1 || true
         log_info "Docker 镜像加速器配置完成"
     fi
 }
@@ -2141,7 +2201,7 @@ set_default_pecl_versions() {
             PECL_REDIS_VERSION="5.3.7"
             PECL_INOTIFY_VERSION="3.0.0"
             PECL_APCU_VERSION="5.1.21"
-            PECL_PSR_VERSION="1.1.0"
+            PECL_PSR_VERSION="1.2.0"
             PECL_MEMCACHED_VERSION="3.1.5"
             PECL_MEMCACHE_VERSION="4.0.5.2"
             PECL_MONGODB_VERSION="1.13.0"
@@ -2153,7 +2213,7 @@ set_default_pecl_versions() {
             PECL_REDIS_VERSION="5.3.7"
             PECL_INOTIFY_VERSION="3.0.0"
             PECL_APCU_VERSION="5.1.21"
-            PECL_PSR_VERSION="1.1.0"
+            PECL_PSR_VERSION="1.2.0"
             PECL_MEMCACHED_VERSION="3.1.5"
             PECL_MEMCACHE_VERSION="4.0.5.2"
             PECL_MONGODB_VERSION="1.13.0"
@@ -2165,7 +2225,7 @@ set_default_pecl_versions() {
             PECL_REDIS_VERSION="6.0.2"
             PECL_INOTIFY_VERSION="3.0.0"
             PECL_APCU_VERSION="5.1.22"
-            PECL_PSR_VERSION="1.1.0"
+            PECL_PSR_VERSION="1.2.0"
             PECL_MEMCACHED_VERSION="3.2.0"
             PECL_MEMCACHE_VERSION="4.0.5.2"
             PECL_MONGODB_VERSION="1.15.0"
@@ -2177,7 +2237,7 @@ set_default_pecl_versions() {
             PECL_REDIS_VERSION="6.0.2"
             PECL_INOTIFY_VERSION="3.0.0"
             PECL_APCU_VERSION="5.1.23"
-            PECL_PSR_VERSION="1.1.0"
+            PECL_PSR_VERSION="1.2.0"
             PECL_MEMCACHED_VERSION="3.2.0"
             PECL_MEMCACHE_VERSION="8.0"     # 这里建议以后你自己放内网包兼容 8.x
             PECL_MONGODB_VERSION="1.16.0"
