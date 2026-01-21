@@ -98,10 +98,17 @@
 
 ```bash
 apt update -y
-apt install -y curl
+apt install -y curl wget
 
-curl -fL https://github.com/ticifer/lnmp-bash/lnmp.sh -o lnmp.sh
+wget -O lnmp.sh https://raw.githubusercontent.com/ticifer/lnmp-bash/main/lnmp.sh
 chmod +x lnmp.sh
+sudo ./lnmp.sh
+
+or 
+
+curl -fL https://raw.githubusercontent.com/ticifer/lnmp-bash/main/lnmp.sh -o lnmp.sh
+chmod +x lnmp.sh
+sudo ./lnmp.sh
 ```
 
 说明：  
@@ -442,7 +449,7 @@ v1.0
 
 欢迎提交 PR、Issue，或提出新功能建议。  
 如需定制或其他问题，可与作者联系。
-
+[交流群](https://t.me/lnmpbash)
 ---
 
 # 🎉 感谢使用 LNMP Installer
